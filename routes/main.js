@@ -1,53 +1,224 @@
 var express = require('express');
-var authRouter = express.Router();
+var router = express.Router();
 const bcrypt = require("bcrypt");
 const passport = require('passport');
 var nodemailer = require("nodemailer");
 const crypto = require('crypto');
+const mongoose = require('mongoose');
+const stripe = require("stripe")(process.env.STRIPE_TEST_KEY);
 
-const User = require('../models/user');
+const User = mongoose.model('User');
+const Masternode = mongoose.model('Masternode');
+const Coin = mongoose.model('Coin');
+const Plan = mongoose.model('Plan');
 
 const {
-    ensureLoggedIn,
-    ensureLoggedOut
+  ensureLoggedIn,
+  ensureLoggedOut
 } = require('connect-ensure-login');
 
+/* GET home page. */
+router.get('/', ensureLoggedIn('/login'), function(req, res, next) {
+  let _user = req.user;
+  // console.log(req.user);
+  Masternode.find({
+    "_owner": _user,
+  }, function(err, data) {
+    console.log(data);
+    if (err) {
+      console.log("There's been an error");
+      res.render('error');
+    } else {
+      _masternodes = data;
+      res.render('index', {
+        title: 'Express',
+        "masternodes": _masternodes,
+        success: false,
+        error: false
+      })
+    }
+  })
+});
+
+router.get('/masternodes', ensureLoggedIn('/login'), function(req, res, next) {
+  Masternode.find({}, function(err, data) {
+    if (err) {
+      res.render('error')
+    } else {
+      console.log(data[0].masternodeprivkey)
+      res.render('masternodes', {
+        "masternodes": data
+      });
+    }
+  });
+});
+
+
+router.get('/success', function(req, res, next) {
+  res.render('success', {
+    title: 'SUCCESS'
+  });
+})
+
+router.post('/deploy/masternode', ensureLoggedIn('/login'),function(req, res, next) {
+  // TODO: Dynamically generate masternodeprivkey for user
+  try {
+    const masternodeprivkey = req.body.masternodeprivkey;
+    const owner = req.user;
+    (async () => {
+      const masterNode = await Masternode.find({
+        "_owner": owner,
+      });
+
+      const coin = await Coin.findOne({
+        'coinTicker': "ANON",
+        _user: owner
+      });
+
+      console.log(masterNode);
+
+
+      if(masterNode.length){
+          if(coin) {
+            const masterNodesExist = await Masternode.find({
+              "_owner": owner,
+              _coin : coin._id
+            });
+            if(masterNodesExist.length) {
+              res.render('index', {
+                title: 'Express',
+                "masternodes": masterNode,
+                success: false,
+                error: "You already have a subscription with this coin : ANON"
+              });
+            } else {
+              console.log('not supported multiple coin subscription');
+            }
+          } else {
+            res.render('index', {
+              title: 'Express',
+              "masternodes": masterNode,
+              success: false,
+              error: "No coin found with ticker ANON"
+            });
+          }
+      } else {
+        console.log('no data masterNode');
+        if(!owner.stripeCustomer){
+          console.log('no customer');
+          res.render('index', {
+            title: 'Express',
+            "masternodes": masterNode,
+            success: false,
+            error: "Customer doesn't have any card. Click on billing to add new."
+          });
+        } else {
+          if(!coin){
+            res.render('index', {
+              title: 'Express',
+              "masternodes": masterNode,
+              success: false,
+              error: "No coin found with ticker ANON"
+            });
+          } else {
+            const plan = await Plan.findOne({
+              '_id': coin.plan
+            })
+
+            // console.log(plan.stripePlan.id)
+            const stripeSubscription = await stripe.subscriptions.create({
+              customer: owner.stripeCustomer.id,
+              items: [{
+                plan: plan.stripePlan.id
+              }]
+            })
+            console.log('stripeSubscription');
+
+            const stripeInvoices = await stripe.invoices.list({
+              limit: 5 ,
+              customer: owner.stripeCustomer.id,
+              subscription: stripeSubscription.id
+            });
+
+            // const stripeUpcomingInvoices = await stripe.invoices.retrieveUpcoming({
+            //   customer: owner.stripeCustomer.id,
+            //   subscription: stripeSubscription.id
+            // });
+
+            console.log('Invoice'+ stripeInvoices);
+            // console.log('Upcoming Invoices'+ stripeUpcomingInvoices);
+
+
+            const newMasternode = new Masternode({
+              masternodeprivkey: masternodeprivkey,
+              _owner: owner,
+              _coin: coin,
+              stripeSubscription: stripeSubscription,
+              stripeInvoices: stripeInvoices,
+              // stripeUpcomingInvoices: stripeUpcomingInvoices
+            })
+
+            newMasternode.save();
+            res.redirect('/');
+          }
+        }
+      }
+    })();
+  } catch (error) {
+    console.log(error);
+    res.render('error')
+  }
+});
+
+router.post('/deploy', ensureLoggedIn('/login'), function(req, res, next) {
+  // console.log(req.body);
+  let masternodeprivkey = req.body.masternodeprivkey;
+  shell.exec("sh ./public/scripts/create.sh " + masternodeprivkey, {
+    async: true
+  })
+  res.redirect('/success')
+  // shell.exec("sh ./public/scripts/create.sh " + txHash, function(code, stdout, stderr) {
+  //   console.log('Exit code:', code);
+  //   console.log('Program output:', stdout);
+  //   console.log('Program stderr:', stderr);
+  // });
+})
+
 // Get Login page
-authRouter.get('/login', ensureLoggedOut('/'), function(req, res, next) {
+router.get('/login', ensureLoggedOut('/'), function(req, res, next) {
   res.render('auth/login');
 });
 
 // Post Log-In request
-authRouter.post('/login', ensureLoggedOut(), passport.authenticate('local-login', {
-    // authRoutes.post('/login', ensureLoggedOut(), passport.authenticate('local-login', {
-        successRedirect: '/',
-        failureRedirect: '/login'
-    })
-);
+router.post('/login', ensureLoggedOut(), passport.authenticate('local-login', {
+  // authRoutes.post('/login', ensureLoggedOut(), passport.authenticate('local-login', {
+  successRedirect: '/',
+  failureRedirect: '/login'
+}));
 
 // Log-out
-authRouter.get('/logout', ensureLoggedIn('/login'), function (req, res) {
-    req.logout();
-    res.redirect('login');
+router.get('/logout', ensureLoggedIn('/login'), function(req, res) {
+  req.logout();
+  res.redirect('login');
 });
 
 // Get Signup page
-authRouter.get('/signup', function(req, res, next) {
-    res.render('auth/signup');
+router.get('/signup', function(req, res, next) {
+  res.render('auth/signup');
 });
 
 // User Sign-up
-authRouter.post('/signup', (req, res, next) => {
-// authRouter.post('/signup', ensureLoggedIn('/login'), requireRole('admin'), (req, res, next) => {
+router.post('/signup', (req, res, next) => {
+  // router.post('/signup', ensureLoggedIn('/login'), requireRole('admin'), (req, res, next) => {
   console.log(req.body.email);
   const email = req.body.email.toString();
   const password = req.body.password.toString();
-  
+
   //Check if user provided email and password
   if (email === "" || password === "") {
     console.log("Indicate username and password");
     res.render("error", {
-        error: "Indicate username and password"
+      error: "Indicate username and password"
     });
     return;
   }
@@ -55,187 +226,190 @@ authRouter.post('/signup', (req, res, next) => {
   User.findOne({
     "email": email
   }, async (err, user) => {
-      if (err) {
-          console.log(err);
-      }
-      if (user !== null) {
-          console.log("The username already exists")
-          res.render("auth/signup", {
-              msg:{
-              "error": "The username already exists"
-              }
-          });
-          return;
-      }
-      //Generate and store hashed password
-      let hashedPassword = generateHashedPassword(password);
-      // TODO: Add user activation token
-      let randomToken = await crypto.randomBytes(20).toString('hex');
-      //Create new user object 
-      const newUser = new User({
-          email: email,
-          password: hashedPassword,
-          accountActivationToken: randomToken.toString()
+    if (err) {
+      console.log(err);
+    }
+    if (user !== null) {
+      console.log("The username already exists")
+      res.render("auth/signup", {
+        msg: {
+          "error": "The username already exists"
+        }
+      });
+      return;
+    }
+    //Generate and store hashed password
+    let hashedPassword = generateHashedPassword(password);
+    // TODO: Add user activation token
+    let randomToken = await crypto.randomBytes(20).toString('hex');
+    //Create new user object
+    const newUser = new User({
+      email: email,
+      password: hashedPassword,
+      accountActivationToken: randomToken.toString()
+    });
+
+    console.log("new user:");
+    console.log(newUser);
+
+    //Save new user to MongoDB
+    try {
+      await newUser.save();
+
+      var smtpTransport = nodemailer.createTransport({
+        // service: process.env.EMAIL_SERVICE,
+        host: process.env.HOST,
+        port: process.env.SMTP_PORT,
+        // secure: process.env.SECURE,
+        secure: false,
+        auth: {
+          user: process.env.EMAIL,
+          pass: process.env.EMAILPW
+        }
       });
 
-      console.log("new user:");
-      console.log(newUser);
+      var mailOptions = {
+        // to: email,
+        to: process.env.EMAIL,
+        from: process.env.EMAIL,
+        subject: 'OneClickMasternodes: Account Registration',
+        // html: emailTemplateSignup(email, newUser.accountActivationToken, process.env.REQ_URL),
+        html: emailTemplateSignup(process.env.EMAIL, newUser.accountActivationToken, process.env.REQ_URL),
+        //req.headers.host
+        attachments: [{
+          filename: 'anon.png',
+          path: process.cwd() + '/public/images/anon.png',
+          cid: 'anon@logo' //same cid value as in the html img src
+        }]
+      };
+      smtpTransport.sendMail(mailOptions, function(err) {
+        if (err) {
+          console.log("node mailer error:", err);
+          return;
+        }
+      });
 
-      //Save new user to MongoDB
-      try {
-          await newUser.save();
-
-          var smtpTransport = nodemailer.createTransport({
-            // service: process.env.EMAIL_SERVICE,
-            host: process.env.HOST,
-            port: process.env.SMTP_PORT,
-            // secure: process.env.SECURE, 
-            secure: false,
-            auth: {
-                user: process.env.EMAIL,
-                pass: process.env.EMAILPW
-            }
-        });
-
-        var mailOptions = {
-            // to: email,
-            to: process.env.EMAIL,
-            from: process.env.EMAIL,
-            subject: 'OneClickMasternodes: Account Registration',
-            // html: emailTemplateSignup(email, newUser.accountActivationToken, process.env.REQ_URL),
-            html: emailTemplateSignup(process.env.EMAIL, newUser.accountActivationToken, process.env.REQ_URL),
-            //req.headers.host
-            attachments: [{
-                filename: 'anon.png',
-                path: process.cwd() + '/public/images/anon.png',
-                cid: 'anon@logo' //same cid value as in the html img src
-            }]
-        };
-        smtpTransport.sendMail(mailOptions, function (err) {
-            if (err) {
-                console.log("node mailer error:", err);
-                return;
-            }
-        });
-
-      } catch (err) {
-          console.log(err);
-          res.render("error", {
-              error: "Something went wrong"
-          });
-      }
-      res.redirect('/');
+    } catch (err) {
+      console.log(err);
+      res.render("error", {
+        error: "Something went wrong"
+      });
+    }
+    res.redirect('/');
   });
 });
 
 // Account/User activation
-authRouter.get('/confirm/:token', function(req, res) {
-    (async () => {
-        const _user = await User.findOne({
-            accountActivationToken: req.params.token
-        });
-        if (_user.isAccountActivated = true) {
-            // TODO: flash/alert error to user "your account has already been activated"
-            res.redirect('/login')
-        } else {
-            _user.isAccountActivated = true
-            _user.save();
-        }
-    })();
-    res.redirect('/');
+router.get('/confirm/:token', function(req, res) {
+  (async () => {
+    const _user = await User.findOne({
+      accountActivationToken: req.params.token
+    });
+    if (_user.isAccountActivated = true) {
+      // TODO: flash/alert error to user "your account has already been activated"
+      res.redirect('/login')
+    } else {
+      _user.isAccountActivated = true
+      _user.save();
+    }
+  })();
+  res.redirect('/');
 });
 
 // Render forgot password view
-authRouter.get('/forgot_password', (req, res, next) => {
-    res.render('auth/forgotPassword');
+router.get('/forgot_password', (req, res, next) => {
+  res.render('auth/forgotPassword');
 });
 
-authRouter.post('/forgot_password', (req, res, next) => {
-    (async () => {
-        const _user = await User.findOne({
-            email: req.body.email
-        });
-        console.log
-        if(!_user) {
-            console.log("User does not exist");
-            res.render("/forgot_password", {
-                msg:{
-                "error": "The username already exists"
-                }
-            });
-            return;
-        } else {
-            //generate random token
-            const _token = crypto.randomBytes(20).toString('hex');
-            _user.resetPasswordToken = _token;
-            _user.resetPasswordExpires = Date.now() + 3600000; // 1 hour
-            _user.save();
-            dispatchMail(_user, 'passwordReset');
+router.post('/forgot_password', (req, res, next) => {
+  (async () => {
+    const _user = await User.findOne({
+      email: req.body.email
+    });
+    console.log
+    if (!_user) {
+      console.log("User does not exist");
+      res.render("/forgot_password", {
+        msg: {
+          "error": "The username already exists"
         }
-    })();
-    res.redirect('/login')
+      });
+      return;
+    } else {
+      //generate random token
+      const _token = crypto.randomBytes(20).toString('hex');
+      _user.resetPasswordToken = _token;
+      _user.resetPasswordExpires = Date.now() + 3600000; // 1 hour
+      _user.save();
+      dispatchMail(_user, 'passwordReset');
+    }
+  })();
+  res.redirect('/login')
 });
 
-authRouter.get('/password_reset/:token', (req, res) => {
-    (async () => {
-        const _user = await User.findOne({
-            resetPasswordToken: req.params.token
-        });
-        console.log(_user)
-    })();
-    res.render('auth/passwordReset', {title: 'Express', passwordResetoken: req.params.token});
+router.get('/password_reset/:token', (req, res) => {
+  (async () => {
+    const _user = await User.findOne({
+      resetPasswordToken: req.params.token
+    });
+    console.log(_user)
+  })();
+  res.render('auth/passwordReset', {
+    title: 'Express',
+    passwordResetoken: req.params.token
+  });
 });
 
-authRouter.post('/password_reset/:token', (req, res, next) => {
-    (async () => {
-        const _user = await User.findOne({
-            resetPasswordToken: req.params.token
-        });
-        let hashedPassword = generateHashedPassword(req.body.newPassword);
-        _user.password = hashedPassword;
-        _user.save();
-    })();
-    res.redirect('/login');
+router.post('/password_reset/:token', (req, res, next) => {
+  (async () => {
+    const _user = await User.findOne({
+      resetPasswordToken: req.params.token
+    });
+    let hashedPassword = generateHashedPassword(req.body.newPassword);
+    _user.password = hashedPassword;
+    _user.save();
+  })();
+  res.redirect('/login');
 });
 
 function dispatchMail(recipient, type) {
-    (async () => {
-        console.log(recipient);
-        console.log(recipient.resetPasswordToken.toString())
-        let smtpTransport = nodemailer.createTransport({
-            // service: process.env.EMAIL_SERVICE,
-            host: process.env.HOST,
-            port: process.env.SMTP_PORT,
-            // secure: process.env.SECURE, 
-            secure: false,
-            auth: {
-                user: process.env.EMAIL,
-                pass: process.env.EMAILPW
-            }
-        });
-        if (type == 'passwordReset') {
-            let mailOptions = {
-                // to: email,
-                to: process.env.EMAIL,
-                from: process.env.EMAIL,
-                subject: 'OneClickMasternodes: Password Reset/Recovery',
-                html: passwordResetTemplate(process.env.EMAIL, recipient.resetPasswordToken, process.env.REQ_URL),
-                attachments: [{
-                    filename: 'anon.png',
-                    path: process.cwd() + '/public/images/anon.png',
-                    cid: 'anon@logo' //same cid value as in the html img src
-                }]
-            };
-            smtpTransport.sendMail(mailOptions, function (err) {
-                if (err) {
-                    console.log("node mailer error:", err);
-                    return;
-                }
-            });
+  (async () => {
+    console.log(recipient);
+    console.log(recipient.resetPasswordToken.toString())
+    let smtpTransport = nodemailer.createTransport({
+      // service: process.env.EMAIL_SERVICE,
+      host: process.env.HOST,
+      port: process.env.SMTP_PORT,
+      // secure: process.env.SECURE,
+      secure: false,
+      auth: {
+        user: process.env.EMAIL,
+        pass: process.env.EMAILPW
+      }
+    });
+    if (type == 'passwordReset') {
+      let mailOptions = {
+        // to: email,
+        to: process.env.EMAIL,
+        from: process.env.EMAIL,
+        subject: 'OneClickMasternodes: Password Reset/Recovery',
+        html: passwordResetTemplate(process.env.EMAIL, recipient.resetPasswordToken, process.env.REQ_URL),
+        attachments: [{
+          filename: 'anon.png',
+          path: process.cwd() + '/public/images/anon.png',
+          cid: 'anon@logo' //same cid value as in the html img src
+        }]
+      };
+      smtpTransport.sendMail(mailOptions, function(err) {
+        if (err) {
+          console.log("node mailer error:", err);
+          return;
         }
-        // TODO: add more case statements
+      });
+    }
+    // TODO: add more case statements
 
-    })();
+  })();
 }
 
 
@@ -249,7 +423,7 @@ function generateHashedPassword(password) {
 }
 
 function emailTemplateSignup(email, token, host) {
-    let newEmail = `<!DOCTYPE html>
+  let newEmail = `<!DOCTYPE html>
     <html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
     <head>
         <meta charset="utf-8"> <!-- utf-8 works for most cases -->
@@ -452,7 +626,7 @@ function emailTemplateSignup(email, token, host) {
                 <![endif]-->
 
                 <!-- Email Header : BEGIN -->
-        
+
                 <!-- Email Header : END -->
 
                 <!-- Email Body : BEGIN -->
@@ -549,11 +723,11 @@ function emailTemplateSignup(email, token, host) {
     </body>
     </html>`
 
-    return newEmail;
+  return newEmail;
 }
 
-function passwordResetTemplate(email, token, host){
-    let newEmail = `<!DOCTYPE html>
+function passwordResetTemplate(email, token, host) {
+  let newEmail = `<!DOCTYPE html>
     <html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
     <head>
         <meta charset="utf-8"> <!-- utf-8 works for most cases -->
@@ -756,7 +930,7 @@ function passwordResetTemplate(email, token, host){
                 <![endif]-->
 
                 <!-- Email Header : BEGIN -->
-        
+
                 <!-- Email Header : END -->
 
                 <!-- Email Body : BEGIN -->
@@ -853,8 +1027,8 @@ function passwordResetTemplate(email, token, host){
     </body>
     </html>`
 
-    return newEmail;
+  return newEmail;
 }
 
 
-module.exports = authRouter;
+module.exports = router;

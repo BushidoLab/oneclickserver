@@ -1,13 +1,24 @@
 const mongoose = require("mongoose");
-const Schema   = mongoose.Schema;
+const Schema = mongoose.Schema;
 
 const userSchema = new Schema({
-  email:  { type: String, required: true, unique: true },
+  email: {
+    type: String,
+    required: true,
+    unique: true
+  },
   password: String,
-  role: { type: String, default: "user", enum: ["admin", "user"] },
+  role: {
+    type: String,
+    default: "user",
+    enum: ["admin", "user"]
+  },
   resetPasswordToken: String,
   resetPasswordExpires: Date,
-  isAccountActivated: { type: Boolean, default: false },
+  isAccountActivated: {
+    type: Boolean,
+    default: false
+  },
   accountActivationToken: String,
   stripeToken: Object,
   stripeCustomer: Object,
